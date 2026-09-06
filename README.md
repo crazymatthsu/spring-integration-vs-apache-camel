@@ -120,8 +120,8 @@ Both implementations insert with `INSERT OR IGNORE` on a unique `(sender_comp_id
 that is redelivered after a crash (at-least-once) does not create duplicates.
 
 Step-by-step walkthroughs of both implementations, with diagrams of the beans, channels, threads and headers, are in
-[usecase1/spring-integration/.../si/README.md](usecase1/spring-integration/src/main/java/com/fixflow/usecase1/si/README.md)
-and [usecase1/apache-camel/.../camel/README.md](usecase1/apache-camel/src/main/java/com/fixflow/usecase1/camel/README.md).
+[usecase1/spring-integration/README.md](usecase1/spring-integration/README.md)
+and [usecase1/apache-camel/README.md](usecase1/apache-camel/README.md).
 
 ## Use case 2: two topics, one handler, acknowledgment per topic
 
@@ -145,8 +145,8 @@ Both handlers delegate to the framework-neutral [`OrderProcessor`](common/src/ma
 from `common`, so the only difference between them is how the acknowledgment is expressed.
 
 Step-by-step walkthroughs of both implementations are in
-[usecase2/spring-integration/.../si/README.md](usecase2/spring-integration/src/main/java/com/fixflow/usecase2/si/README.md)
-and [usecase2/apache-camel/.../camel/README.md](usecase2/apache-camel/src/main/java/com/fixflow/usecase2/camel/README.md).
+[usecase2/spring-integration/README.md](usecase2/spring-integration/README.md)
+and [usecase2/apache-camel/README.md](usecase2/apache-camel/README.md).
 
 ## The one big difference: acknowledging from another thread
 

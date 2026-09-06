@@ -1,11 +1,11 @@
 # How `OrderSourcesConfiguration` builds and runs the flows
 
-This package is use case 2 with Spring Integration: FIX orders arrive on two Kafka topics, `algo` and `dma`, are
+This module is use case 2 with Spring Integration: FIX orders arrive on two Kafka topics, `algo` and `dma`, are
 published to one in-memory channel, handled asynchronously by a single handler class, and acknowledged back to the
-topic each record came from. All of it is wired in [`OrderSourcesConfiguration`](OrderSourcesConfiguration.java),
-with the work itself in [`OrderHandler`](OrderHandler.java).
+topic each record came from. All of it is wired in [`OrderSourcesConfiguration`](src/main/java/com/fixflow/usecase2/si/OrderSourcesConfiguration.java),
+with the work itself in [`OrderHandler`](src/main/java/com/fixflow/usecase2/si/OrderHandler.java).
 
-As in the [use case 1 walkthrough](../../../../../../../../../usecase1/spring-integration/src/main/java/com/fixflow/usecase1/si/README.md),
+As in the [use case 1 walkthrough](../../usecase1/spring-integration/README.md),
 read the class at two levels: **build time**, where `@Bean` methods produce beans and three `IntegrationFlow`
 descriptions that Spring Integration turns into channels and endpoints at startup, and **run time**, where a
 `Message` travels through them and changes thread once. The new element here is that three flows meet on one
@@ -156,7 +156,7 @@ and the record redelivered.
 `asyncAcks=true` on both containers. `acknowledge()` called on a handler thread is queued; the owning container's
 consumer thread drains the queue, commits each partition up to its first unacknowledged offset, and resumes polling
 once every record of its last poll is acknowledged. Details in
-[docs/kafka-manual-ack-and-batching.md](../../../../../../../../../docs/kafka-manual-ack-and-batching.md).
+[docs/kafka-manual-ack-and-batching.md](../../docs/kafka-manual-ack-and-batching.md).
 
 ## Things that look odd but are deliberate
 

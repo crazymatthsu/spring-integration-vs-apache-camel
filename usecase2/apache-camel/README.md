@@ -1,11 +1,11 @@
 # How `OrderSourcesRoutes` builds and runs the routes
 
-This package is use case 2 with Apache Camel: FIX orders arrive on two Kafka topics, `algo` and `dma`, are put on one
+This module is use case 2 with Apache Camel: FIX orders arrive on two Kafka topics, `algo` and `dma`, are put on one
 in-memory queue, handled asynchronously by a single handler class, and acknowledged back to the topic each record
-came from. All of it is wired in [`OrderSourcesRoutes`](OrderSourcesRoutes.java), with the work itself in
-[`OrderHandler`](OrderHandler.java).
+came from. All of it is wired in [`OrderSourcesRoutes`](src/main/java/com/fixflow/usecase2/camel/OrderSourcesRoutes.java), with the work itself in
+[`OrderHandler`](src/main/java/com/fixflow/usecase2/camel/OrderHandler.java).
 
-As in the [use case 1 walkthrough](../../../../../../../../../usecase1/apache-camel/src/main/java/com/fixflow/usecase1/camel/README.md),
+As in the [use case 1 walkthrough](../../usecase1/apache-camel/README.md),
 read the class at two levels: **build time**, where `configure()` appends three route definitions that Camel turns
 into consumers and processors at startup, and **run time**, where an `Exchange` travels through them and changes
 thread once. The new element here is that three routes meet on one `seda` queue.
@@ -163,7 +163,7 @@ which remembers the offsets returned by every `poll()` and commits each partitio
 offset before the next `poll()`, and the commit factory hands the route `CamelKafkaManualCommit` values whose
 `commit()` only marks the offset as acknowledged. Each proxy belongs to one consumer, so an `algo` record's handle
 updates the `algo` proxy and a `dma` record's handle the `dma` proxy. Details, and the comparison with Spring
-Kafka's built-in `asyncAcks`, in [docs/kafka-manual-ack-and-batching.md](../../../../../../../../../docs/kafka-manual-ack-and-batching.md).
+Kafka's built-in `asyncAcks`, in [docs/kafka-manual-ack-and-batching.md](../../docs/kafka-manual-ack-and-batching.md).
 
 ## Things that look odd but are deliberate
 
