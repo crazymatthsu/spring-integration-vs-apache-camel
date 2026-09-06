@@ -1,0 +1,52 @@
+[versions]
+springBoot = "4.1.1"
+camel = "4.22.0"
+quickfixj = "3.0.2"
+sqliteJdbc = "3.53.4.0"
+kafkaClients = "4.2.1"
+
+[libraries]
+# BOMs
+spring-boot-bom = { module = "org.springframework.boot:spring-boot-dependencies", version.ref = "springBoot" }
+camel-spring-boot-bom = { module = "org.apache.camel.springboot:camel-spring-boot-bom", version.ref = "camel" }
+camel-bom = { module = "org.apache.camel:camel-bom", version.ref = "camel" }
+
+# Spring Boot starters (versions managed by the Spring Boot BOM)
+spring-boot-starter = { module = "org.springframework.boot:spring-boot-starter" }
+spring-boot-starter-integration = { module = "org.springframework.boot:spring-boot-starter-integration" }
+spring-boot-starter-jdbc = { module = "org.springframework.boot:spring-boot-starter-jdbc" }
+spring-boot-starter-kafka = { module = "org.springframework.boot:spring-boot-starter-kafka" }
+spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test" }
+
+# Spring Integration / Spring Kafka (versions managed by the Spring Boot BOM)
+spring-integration-core = { module = "org.springframework.integration:spring-integration-core" }
+spring-integration-kafka = { module = "org.springframework.integration:spring-integration-kafka" }
+spring-integration-jdbc = { module = "org.springframework.integration:spring-integration-jdbc" }
+spring-kafka = { module = "org.springframework.kafka:spring-kafka" }
+spring-jdbc = { module = "org.springframework:spring-jdbc" }
+spring-context = { module = "org.springframework:spring-context" }
+
+# Apache Camel Spring Boot starters (versions managed by the Camel Spring Boot BOM)
+camel-spring-boot-starter = { module = "org.apache.camel.springboot:camel-spring-boot-starter" }
+camel-kafka-starter = { module = "org.apache.camel.springboot:camel-kafka-starter" }
+camel-sql-starter = { module = "org.apache.camel.springboot:camel-sql-starter" }
+camel-seda-starter = { module = "org.apache.camel.springboot:camel-seda-starter" }
+camel-bean-starter = { module = "org.apache.camel.springboot:camel-bean-starter" }
+camel-kafka = { module = "org.apache.camel:camel-kafka" }
+
+# FIX, database, Kafka client
+quickfixj-core = { module = "org.quickfixj:quickfixj-core", version.ref = "quickfixj" }
+quickfixj-messages-fix42 = { module = "org.quickfixj:quickfixj-messages-fix42", version.ref = "quickfixj" }
+sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqliteJdbc" }
+kafka-clients = { module = "org.apache.kafka:kafka-clients", version.ref = "kafkaClients" }
+slf4j-api = { module = "org.slf4j:slf4j-api" }
+logback-classic = { module = "ch.qos.logback:logback-classic" }
+
+# Testing (versions managed by the Spring Boot BOM)
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+assertj-core = { module = "org.assertj:assertj-core" }
+awaitility = { module = "org.awaitility:awaitility" }
+
+[plugins]
+spring-boot = { id = "org.springframework.boot", version.ref = "springBoot" }

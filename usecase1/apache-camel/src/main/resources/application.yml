@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: usecase1-apache-camel
+  main:
+    keep-alive: true
+  datasource:
+    url: jdbc:sqlite:${fixflow.db.path:./usecase1-apache-camel.db}
+    hikari:
+      maximum-pool-size: 2
+      data-source-properties:
+        journal_mode: WAL
+        busy_timeout: 10000
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/orders-schema.sql
+
+camel:
+  component:
+    kafka:
+      brokers: ${FIXFLOW_KAFKA_BOOTSTRAP:localhost:9092}
+      # manual commits that may be issued from any thread (see camel-kafka-support)
+      kafka-client-factory: "#bean:deferredCommitKafkaClientFactory"
+      kafka-manual-commit-factory: "#bean:deferredKafkaManualCommitFactory"
+
+fixflow:
+  orders:
+    topic: orders
+    group-id: uc1-apache-camel
+    batch-size: 50
+    batch-timeout: 500ms
+    concurrency: 1
+
+logging:
+  level:
+    com.fixflow: INFO
+    org.apache.kafka: WARN
+    org.apache.camel.component.kafka: WARN
