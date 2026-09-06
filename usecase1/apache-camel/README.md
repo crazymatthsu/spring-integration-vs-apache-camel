@@ -1,9 +1,9 @@
 # How `OrdersRoute` builds and runs the route
 
-This package is use case 1 with Apache Camel: FIX orders from Kafka, batched asynchronously, inserted into SQLite
+This module is use case 1 with Apache Camel: FIX orders from Kafka, batched asynchronously, inserted into SQLite
 with one JDBC batch, acknowledged to Kafka only after the insert. All of it is wired in
-[`OrdersRoute`](OrdersRoute.java). Like its Spring Integration twin
-([walkthrough](../../../../../../../../spring-integration/src/main/java/com/fixflow/usecase1/si/README.md)) it works at
+[`OrdersRoute`](src/main/java/com/fixflow/usecase1/camel/OrdersRoute.java). Like its Spring Integration twin
+([walkthrough](../spring-integration/README.md)) it works at
 two levels:
 
 1. **Build time.** `configure()` runs once at startup. Its fluent calls do not process anything; they append nodes to
@@ -210,7 +210,7 @@ component at the two factories from `camel-kafka-support`:
 
 The batch thread therefore never calls the Kafka client; it only updates a set that the consumer thread reads. The
 details, and the difference to Spring Kafka's built-in `asyncAcks`, are in
-[docs/kafka-manual-ack-and-batching.md](../../../../../../../../../docs/kafka-manual-ack-and-batching.md).
+[docs/kafka-manual-ack-and-batching.md](../../docs/kafka-manual-ack-and-batching.md).
 
 ## Things that look odd but are deliberate
 

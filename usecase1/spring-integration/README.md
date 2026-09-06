@@ -1,8 +1,8 @@
 # How `OrdersFlowConfiguration` builds and runs the flow
 
-This package is use case 1 with Spring Integration: FIX orders from Kafka, batched asynchronously, inserted into
+This module is use case 1 with Spring Integration: FIX orders from Kafka, batched asynchronously, inserted into
 SQLite with one JDBC batch, acknowledged to Kafka only after the insert. All of it is wired in
-[`OrdersFlowConfiguration`](OrdersFlowConfiguration.java). The class is short but dense, because it works at two
+[`OrdersFlowConfiguration`](src/main/java/com/fixflow/usecase1/si/OrdersFlowConfiguration.java). The class is short but dense, because it works at two
 levels at once:
 
 1. **Build time.** The `@Bean` methods produce ordinary Spring beans plus one `IntegrationFlow` object, which is a
@@ -189,7 +189,7 @@ first unacknowledged offset, so a never-acknowledged record would block every la
 `asyncAcks=true` on the container is the enabler for the whole design. `Acknowledgment.acknowledge()` called on
 `uc1-batch-1` or `scheduling-1` is queued; the consumer thread drains the queue, commits each partition up to its
 first unacknowledged offset, and resumes polling once every record of the last poll is acknowledged. The details and
-their consequences for batch sizing are in [docs/kafka-manual-ack-and-batching.md](../../../../../../../../../docs/kafka-manual-ack-and-batching.md).
+their consequences for batch sizing are in [docs/kafka-manual-ack-and-batching.md](../../docs/kafka-manual-ack-and-batching.md).
 
 ## Things that look odd but are deliberate
 
