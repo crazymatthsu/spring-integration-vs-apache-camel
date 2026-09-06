@@ -35,6 +35,9 @@ fixflow:
     batch-size: 50
     batch-timeout: 500ms
     concurrency: 1
+  alerts:
+    # rows skipped by the insert fallback are reported here (and always logged with the SUPPORT_ALERT marker)
+    topic: support-alerts
 
 logging:
   level:

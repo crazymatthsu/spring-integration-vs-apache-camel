@@ -31,13 +31,14 @@ dependencies {
 
 tasks.register<JavaExec>("sendOrders") {
     group = "demo"
-    description = "Publishes sample FIX 4.2 NewOrderSingle messages to Kafka. Options: -Ptopic=orders -Pcount=100 -PinvalidEvery=0"
+    description = "Publishes sample FIX 4.2 NewOrderSingle messages to Kafka. Options: -Ptopic=orders -Pcount=100 -PinvalidEvery=0 -PduplicateEvery=0"
     classpath = sourceSets.main.get().runtimeClasspath
     mainClass.set("com.fixflow.common.tools.FixOrderProducer")
     args(
         (project.findProperty("topic") ?: "orders").toString(),
         (project.findProperty("count") ?: "100").toString(),
         (project.findProperty("invalidEvery") ?: "0").toString(),
+        (project.findProperty("duplicateEvery") ?: "0").toString(),
     )
     systemProperty("fixflow.kafka.bootstrap", System.getenv("FIXFLOW_KAFKA_BOOTSTRAP") ?: "localhost:9092")
 }

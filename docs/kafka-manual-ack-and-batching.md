@@ -118,9 +118,9 @@ spring:
 
 Code changes worth making at larger sizes (`OrdersFlowConfiguration`):
 
-1. Wrap the insert in a transaction: `.handle(ordersBatchInsert, e -> e.transactional())`. The JDBC handler runs
-   the batch in autocommit mode, so SQLite fsyncs every row; one transaction per batch removes that. Spring Boot
-   provides the `DataSourceTransactionManager`.
+1. The insert already runs in one transaction per batch (`.handle(ordersBatchInsert, e -> e.advice(...).transactional())`),
+   which the batch-insert fallback needs anyway: a failed batch must be rolled back before its rows are retried one
+   by one. Without it the JDBC handler would run the batch in autocommit mode and SQLite would fsync every row.
 2. Consider `ListenerMode.batch` on the Kafka inbound adapter: one message per poll with a `List` payload and one
    acknowledgment, no aggregator needed, batch size equals poll size by construction. The trade-off is that the
    batch timeout disappears, so a slow topic yields small batches.
@@ -134,8 +134,9 @@ Batches larger than a poll require section 3.
 - The deferred-commit proxy does not pause the consumer, so a Camel batch can span polls. The contiguous-prefix rule
   keeps that safe; the cost is more outstanding offsets in memory.
 - `pollTimeoutMs` is the commit flush cadence of the proxy when the topic is idle.
-- The `sql` endpoint with `batch=true` issues one `executeBatch()`; wrap it with `.transacted()` and a Spring
-  transaction manager for one transaction per batch.
+- The `sql` endpoint with `batch=true` issues one `executeBatch()`; `batchAutoCommitDisabled=true` (used by the demo)
+  makes the producer commit after the batch and roll back on failure, one transaction per batch without a Spring
+  transaction manager.
 
 ## 6. Decision summary
 

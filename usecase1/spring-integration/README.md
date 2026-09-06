@@ -25,8 +25,9 @@ flowchart TB
         X --> P["service activator<br/>parse FIX 4.2 into NewOrder<br/>advice traps failures"]
         P -->|"Message&lt;NewOrder&gt;,<br/>same headers"| G["aggregator<br/>one group 'orders'<br/>release: size reaches batchSize"]
         G -->|"Message&lt;List&lt;NewOrder&gt;&gt;<br/>+ fixflow_batchAcknowledgments"| PS[/"PublishSubscribeChannel<br/>no executor = sequential"/]
-        PS -->|"1st subscriber"| J["JdbcMessageHandler<br/>one JDBC batch INSERT"]
-        PS -->|"2nd subscriber,<br/>only if 1st succeeded"| ACK["acknowledge every<br/>record of the batch"]
+        PS -->|"1st subscriber"| J["JdbcMessageHandler<br/>one JDBC batch INSERT<br/>in one transaction"]
+        J -.->|"row-level failure:<br/>rolled back, advice traps it"| FB["batchInsertFallback flow<br/>split, insert one by one,<br/>aggregate, alert support"]
+        PS -->|"2nd subscriber,<br/>only if 1st succeeded<br/>or fell back"| ACK["acknowledge every<br/>record of the batch"]
     end
     subgraph ST["scheduler thread (scheduling-1)"]
         T["groupTimeout expired:<br/>release the partial group"] --> G
@@ -61,6 +62,10 @@ Dashed lines are acknowledgments; they do not carry messages further down the fl
 | `invalidOrderHandler` | `InvalidOrderHandler` | Poison-record policy: log, acknowledge, count. |
 | `ordersFlow` | `IntegrationFlow` | The description of the main pipeline (below). |
 | `invalidOrdersFlow` | `IntegrationFlow` | `from("invalidOrders").handle(invalidOrderHandler)`: a `DirectChannel` created on demand plus one endpoint. |
+| `batchInsertFallbackAdvice` | `ExpressionEvaluatingRequestHandlerAdvice` | The same construction around the batch insert: traps the failure of the (already rolled back) batch and sends an `ErrorMessage` carrying the batch to `batchInsertFallback`. |
+| `batchInsertFallbackFlow` | `IntegrationFlow` | `from("batchInsertFallback")`: check the failure is row-level, `split` the batch, insert each row, `aggregate` the outcomes, alert support about the skipped rows. |
+| `supportAlerter` | `CompositeSupportAlerter` (`@Primary`) | From [`SupportAlertConfiguration`](src/main/java/com/fixflow/usecase1/si/SupportAlertConfiguration.java): fans out to `LoggingSupportAlerter` (ERROR line with the `SUPPORT_ALERT` marker, keeps the recent alerts) and `KafkaSupportAlerter` (one record per alert on `fixflow.alerts.topic`). |
+| `transactionManager` | `DataSourceTransactionManager` | Auto-configured by Spring Boot; used by `.transactional()` on the batch insert. |
 
 Nothing in this table talks to Kafka or SQLite yet. That starts when Spring Integration's `IntegrationFlowBeanPostProcessor`
 walks the two `IntegrationFlow` beans, registers every channel and endpoint as a bean of its own (names such as
@@ -83,7 +88,8 @@ IntegrationFlow
             .expireGroupsUponCompletion(true)
             .outputProcessor(OrdersFlowConfiguration::toBatch))
     .publishSubscribeChannel(pubSub -> pubSub                                                // 5
-            .subscribe(flow -> flow.handle(ordersBatchInsert))
+            .subscribe(flow -> flow.handle(ordersBatchInsert,
+                    e -> e.advice(batchInsertFallbackAdvice).transactional()))
             .subscribe(flow -> flow.handle(message -> acknowledge(message, batchStats))))
     .get();                                                                                  // 6
 ```
@@ -122,13 +128,49 @@ question:
 executor configured the channel invokes them sequentially, on the releasing thread, in subscription order, and stops
 at the first exception. That gives the ordering the requirement asks for:
 
-1. `ordersBatchInsert` (`JdbcMessageHandler`) sees an `Iterable` payload and runs one JDBC `executeBatch()`.
+1. `ordersBatchInsert` (`JdbcMessageHandler`) sees an `Iterable` payload and runs one JDBC `executeBatch()`. It is
+   wrapped by two advices: `.transactional()` makes the batch one transaction, and `batchInsertFallbackAdvice`,
+   declared first and therefore outermost, sees a failure only after the rollback.
 2. `acknowledge(...)` reads `fixflow_batchAcknowledgments`, calls `acknowledge()` on each, records the batch size.
 
-If the insert throws, the second subscriber never runs, nothing is acknowledged, and the records are redelivered after
-a restart (the `INSERT OR IGNORE` statement makes that redelivery idempotent).
+When the batch insert fails, what happens next depends on the failure (see the fallback below). If the fallback
+decides the database itself is in trouble it rethrows, the second subscriber never runs, nothing is acknowledged, and
+the records are redelivered after a restart.
 
 **6. `.get()`** returns the `IntegrationFlow` description that the post-processor turns into beans.
+
+## The fallback: a batch that fails on a row
+
+```java
+IntegrationFlow.from(BATCH_INSERT_FALLBACK_CHANNEL)                                          // batchInsertFallback
+        .transform(MessagingException.class, OrdersFlowConfiguration::failedBatch)           // a
+        .split()                                                                             // b
+        .handle(NewOrder.class, (order, headers) -> insertOne(jdbcTemplate, order))          // c
+        .aggregate(aggregator -> aggregator.expireGroupsUponCompletion(true))                // d
+        .handle(List.class, (results, headers) -> { report(...); return null; })             // e
+        .get();
+```
+
+The advice sends an `ErrorMessage` to `batchInsertFallback`, a `DirectChannel`, so this whole flow runs on the batch
+thread *inside* the trapped call, before the pub/sub channel moves on to the acknowledgment subscriber.
+
+- **a.** The `ErrorMessage` payload is the advice's exception; its `failedMessage` is the batch and its cause the
+  `DataAccessException`. `failedBatch` asks [`InsertFailurePolicy`](../../common/src/main/java/com/fixflow/common/orders/InsertFailurePolicy.java)
+  whether the cause is *row-level* (duplicate key, constraint violation, bad data) or *database-level* (connection
+  lost, locked, disk full). Database-level: it rethrows, the batch is not acknowledged, Kafka redelivers it later.
+  Row-level: it returns the `List<NewOrder>` with the cause in the `fixflow_batchFailure` header.
+- **b.** The splitter emits one message per order, with sequence headers the aggregator will use.
+- **c.** Each order is inserted with `NamedParameterJdbcTemplate` in its own autocommitted statement. A row-level
+  failure is logged and turned into a `RowInsert` carrying an `InsertFailure`; a database-level failure is rethrown
+  and aborts everything.
+- **d.** The default aggregator collects the `RowInsert` outcomes of the batch back into one `List`.
+- **e.** `report` records the fallback in `BatchStats` and, when rows were skipped, raises one `SupportAlert` for the
+  batch through the `SupportAlerter`: an ERROR log line with the `SUPPORT_ALERT` marker, and a record on the
+  `support-alerts` topic. The good rows are in the database, the bad ones are on the support team's desk, and the
+  acknowledgment subscriber now runs for the whole batch.
+
+The integration test replays two orders that are already stored: their batch fails on the unique index, falls back,
+skips exactly those two rows, raises the alert, and the group's offsets still cover every record.
 
 ## Run time: one record end to end
 
@@ -165,8 +207,8 @@ sequenceDiagram
 | Thread | Work |
 |---|---|
 | `ordersListenerContainer-0-C-1` | Polls Kafka, creates one message per record, enqueues it on `ordersChannel`, later commits the acknowledged offsets. Never parses, never touches the database. |
-| `uc1-batch-1` | Parses, adds to the group, and when the size condition fires: builds the batch, inserts, acknowledges. Also runs `InvalidOrderHandler`, because `invalidOrders` is a `DirectChannel`. |
-| `scheduling-1` | Releases a partial group when `batchTimeout` expires, then runs the same insert and acknowledge steps. |
+| `uc1-batch-1` | Parses, adds to the group, and when the size condition fires: builds the batch, inserts, acknowledges. Also runs `InvalidOrderHandler` and the whole insert fallback, because `invalidOrders` and `batchInsertFallback` are `DirectChannel`s. |
+| `scheduling-1` | Releases a partial group when `batchTimeout` expires, then runs the same insert, fallback and acknowledge steps. |
 
 ## Headers that carry state through the flow
 
@@ -199,6 +241,12 @@ their consequences for batch sizing are in [docs/kafka-manual-ack-and-batching.m
   the first batch.
 - A custom `outputProcessor`: the only way to keep the per-record acknowledgments across the aggregator.
 - A pub/sub channel for "insert, then ack": sequential subscribers give ordering and failure short-circuiting for free.
+- `advice(batchInsertFallbackAdvice).transactional()` in that order: the first advice is the outermost, and the fallback
+  must see the failure after the transaction rolled back, otherwise the rows already written by the partial batch would
+  show up as duplicates during the one-by-one pass.
+- The fallback is a flow of its own rather than a `try`/`catch` in a lambda: `split` → `handle` → `aggregate` keeps the
+  per-row outcomes visible as messages, and the `DirectChannel` between advice and flow is what makes it synchronous.
+- Plain `INSERT` instead of `INSERT OR IGNORE`: a replayed order must fail so that it can be reported.
 - A one-thread executor: ordering per partition matters for offsets, and SQLite has a single writer anyway.
 - `spring.integration.jdbc.initialize-schema: never` in `application.yml`: Spring Boot would otherwise try to create
   Spring Integration's JDBC message-store tables for SQLite, which do not exist.

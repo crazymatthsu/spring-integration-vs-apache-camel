@@ -26,7 +26,8 @@ flowchart TB
     AG -->|"completionSize or completionTimeout<br/>submit to executorService"| B
     subgraph BT["batch thread (Camel thread - uc1-batch)"]
         B["aggregated Exchange<br/>body List&lt;Exchange&gt;"] --> SP["process toSqlParameters<br/>property fixflowBatchRecords = records<br/>body = List&lt;Map&gt; of SQL parameters"]
-        SP --> SQL["to sql:INSERT ...?batch=true<br/>one JDBC batch INSERT"]
+        SP --> SQL["to direct:insertBatch<br/>doTry sql?batch=true<br/>one JDBC batch INSERT, one transaction"]
+        SQL -.->|"row-level failure:<br/>rolled back, doCatch"| FB["direct:insertOneByOne<br/>split, direct:insertRow,<br/>alert support"]
         SQL --> ACK["process acknowledgeBatch<br/>commit() on every record"]
     end
     ACK -.->|"acknowledgments parked,<br/>committed by the consumer<br/>thread before its next poll"| K
@@ -58,10 +59,12 @@ Dashed lines are acknowledgments; they do not carry exchanges further along the 
 | `deferredCommitKafkaClientFactory` | `DeferredCommitKafkaClientFactory` | From `camel-kafka-support`, imported by the application class. Wraps every Kafka consumer in a proxy that applies parked commits on the consumer thread. Referenced by `camel.component.kafka.kafka-client-factory`. |
 | `deferredKafkaManualCommitFactory` | `DeferredKafkaManualCommitFactory` | Creates the `CamelKafkaManualCommit` header values whose `commit()` is safe from any thread. Referenced by `camel.component.kafka.kafka-manual-commit-factory`. |
 | `dataSource` | HikariCP over SQLite | Spring Boot's auto-configured `DataSource`; the Camel `sql` component auto-wires it. `spring.sql.init` applies the schema at startup. |
+| `supportAlerter` | `CompositeSupportAlerter` (`@Primary`) | From [`SupportAlertConfiguration`](src/main/java/com/fixflow/usecase1/camel/SupportAlertConfiguration.java): fans out to `LoggingSupportAlerter` (ERROR line with the `SUPPORT_ALERT` marker, keeps the recent alerts) and `KafkaSupportAlerter` (one record per alert on `fixflow.alerts.topic`). Injected into the route builder. |
 
-What Camel does with them at startup: it calls `configure()` on the route builder, reifies the resulting definition into
+What Camel does with them at startup: it calls `configure()` on the route builder, reifies the resulting definitions into
 processors, creates the Kafka consumer through the client factory (so the consumer is the deferred-commit proxy), starts
-the route, and logs `Started uc1-orders (kafka://orders)`.
+the four routes, and logs `Routes startup (total:4)` with `uc1-orders`, `uc1-insert-batch`, `uc1-insert-one-by-one`
+and `uc1-insert-row`.
 
 ## The DSL, step by step
 
@@ -84,9 +87,30 @@ from(kafkaUri())                                                                
                 .parallelProcessing()
                 .executorService(batchExecutor)
                 .process(this::toSqlParameters)                                                 // 5
-                .to("sql:" + OrderSql.INSERT_CAMEL.replaceAll("\\s+", " ") + "?batch=true")     // 6
+                .to("direct:insertBatch")                                                       // 6
                 .process(this::acknowledgeBatch)                                                // 7
         .end();                                                                                 // 8
+
+from("direct:insertBatch").routeId("uc1-insert-batch")                                          // 6, continued
+        .doTry()
+                .to(BATCH_INSERT)                       // sql:INSERT ...?batch=true&batchAutoCommitDisabled=true
+        .doCatch(DataAccessException.class)
+                .to("direct:insertOneByOne")
+        .end();
+
+from("direct:insertOneByOne").routeId("uc1-insert-one-by-one")
+        .process(this::startFallback)                   // rethrows unless the failure is row-level
+        .split(body()).stopOnException()
+                .to("direct:insertRow")
+        .end()
+        .process(this::reportFallback);                 // one SupportAlert per batch with skipped rows
+
+from("direct:insertRow").routeId("uc1-insert-row")
+        .doTry()
+                .to(SINGLE_INSERT)                      // sql:INSERT ... (one row)
+        .doCatch(DataAccessException.class)
+                .process(this::skipFailedRow)           // records the row, or rethrows for database-level failures
+        .end();
 ```
 
 **0. The batch thread.** A single-thread executor obtained from Camel's `ExecutorServiceManager`, so Camel names it
@@ -132,17 +156,40 @@ exchange. An invalid message throws here and lands in step 1.
 `List<Map<String, Object>>`, one map of named parameters per order (`OrderSql.parameters`). The property is needed
 because the next step consumes the body.
 
-**6. Insert.** The `sql` component. The statement is the URI path, so whitespace is collapsed to one line; parameters
-use Camel's `:#name` syntax (`OrderSql.INSERT_CAMEL`). `batch=true` makes the producer iterate the body and bind each
-map as one row of a single JDBC `executeBatch()`. The `DataSource` is auto-wired from Spring Boot.
+**6. Insert, with a fallback.** `.to("direct:insertBatch")` calls the second route on the same thread (`direct:` is a
+synchronous, in-process call that carries the exchange, properties included). That route wraps the `sql` component in
+`doTry`/`doCatch`. The statement is the URI path, so whitespace is collapsed to one line; parameters use Camel's
+`:#name` syntax (`OrderSql.INSERT_CAMEL`). `batch=true` makes the producer iterate the body and bind each map as one
+row of a single JDBC `executeBatch()`, and `batchAutoCommitDisabled=true` makes that batch one transaction: the
+producer commits after the batch and rolls back when it fails, so the fallback starts from a clean slate. The
+`DataSource` is auto-wired from Spring Boot.
+
+When the batch fails with a `DataAccessException`, `doCatch` calls `direct:insertOneByOne`:
+
+- `startFallback` asks [`InsertFailurePolicy`](../../common/src/main/java/com/fixflow/common/orders/InsertFailurePolicy.java)
+  whether the cause is *row-level* (duplicate key, constraint violation, bad data) or *database-level* (connection
+  lost, locked, disk full). Database-level: it rethrows, the exception travels back through both `direct:` calls, the
+  aggregated exchange fails, step 7 never runs and Kafka redelivers the batch later. Row-level: it logs and puts an
+  empty failure list in the `fixflowRowFailures` property.
+- `split(body())` sends each parameter map through `direct:insertRow`, whose own `doTry`/`doCatch` inserts the row in
+  an autocommitted statement and, on a row-level failure, calls `skipFailedRow`: log, and add an `InsertFailure` to
+  the shared list (split sub-exchanges receive the parent's properties by reference, so the list is the same object).
+  `stopOnException()` lets a database-level rethrow abort the whole split.
+- After the split the original exchange continues to `reportFallback`, which records the fallback in `BatchStats` and,
+  when rows were skipped, raises one `SupportAlert` for the batch through the `SupportAlerter`: an ERROR log line with
+  the `SUPPORT_ALERT` marker and a record on the `support-alerts` topic.
+
+Either way the call returns to the aggregate sub-route with the good rows in the database and the bad ones reported.
 
 **7. Acknowledge.** `acknowledgeBatch` takes the original exchanges back from the property and calls
 `KafkaManualCommits.commitAll(records)`, that is `CamelKafkaManualCommit.commit()` on every record. With the deferred
-factory this only marks the offset as acknowledged in a concurrent set; nothing touches the Kafka client here. If step
-6 throws, Camel's default error handler logs the failure and this step never runs, so the batch is redelivered after a
-restart (the `INSERT OR IGNORE` statement makes that idempotent).
+factory this only marks the offset as acknowledged in a concurrent set; nothing touches the Kafka client here. It
+runs after a successful batch and after a completed fallback, never after a database-level abort.
 
 **8. `.end()`** closes the aggregate block; there is nothing after it.
+
+The integration test replays two orders that are already stored: their batch fails on the unique index, falls back,
+skips exactly those two rows, raises the alert, and the group's offsets still cover every record.
 
 ## Run time: one record end to end
 
@@ -176,7 +223,7 @@ sequenceDiagram
 | Thread | Work |
 |---|---|
 | `Camel (camel-1) thread #N - KafkaConsumer[orders]` | Polls Kafka, parses each record, adds it to the aggregator group, runs `onException` for poison records, and commits the parked acknowledgments before every poll. Never touches the database. |
-| `Camel (camel-1) thread #N - uc1-batch` | Reshapes the batch, runs the JDBC batch insert, acknowledges every record. Both size-completed and timeout-completed batches end up here. |
+| `Camel (camel-1) thread #N - uc1-batch` | Reshapes the batch, runs the JDBC batch insert, runs the whole fallback when needed (the `direct:` routes execute on the caller's thread), acknowledges every record. Both size-completed and timeout-completed batches end up here. |
 | `Camel (camel-1) thread #N - AggregateTimeoutChecker` | Every 100 ms checks whether the open group is older than `completionTimeout`; if so, submits it to the batch thread. |
 
 ## Headers and properties that carry state through the route
@@ -227,6 +274,13 @@ details, and the difference to Spring Kafka's built-in `asyncAcks`, are in
 - The SQL statement squeezed onto one line inside a URI, with `:#name` parameters: the `sql` component reads the
   statement from the endpoint URI.
 - `pollTimeoutMs=250`: a short idle poll keeps the commit latency of parked acknowledgments low.
+- `batchAutoCommitDisabled=true` on the batch endpoint: without it the `sql` producer runs the batch in autocommit mode
+  and a failed batch leaves its earlier rows behind, which the one-by-one pass would then report as duplicates.
+- Three small `direct:` routes for the fallback instead of nesting `doTry`/`doCatch` inside `split` inside `doCatch`:
+  the nested form compiled and ran, but the Java DSL's block bookkeeping attached the acknowledgment step to the
+  catch block, so only failed batches were acknowledged (the integration test caught it). A `doTry`/`doCatch` that is
+  the last thing in its own route has nothing left to misplace.
+- Plain `INSERT` instead of `INSERT OR IGNORE`: a replayed order must fail so that it can be reported.
 
 ## Same use case, the other framework
 
@@ -241,7 +295,8 @@ details, and the difference to Spring Kafka's built-in `asyncAcks`, are in
 
 ## See it happen
 
-Start the module and watch the startup summary (`Started uc1-orders (kafka://orders)`), then send orders with the demo
+Start the module and watch the startup summary (`Routes startup (total:4)`, `Started uc1-orders (kafka://orders)`
+first), then send orders with the demo
 producer. Each `Inserted and acknowledged a batch of ... orders on ...` line names the thread; every batch, size or
 timeout completed, shows `uc1-batch`, while `Skipping invalid order ...` lines come from the `KafkaConsumer[orders]`
 thread. `logging.level.org.apache.camel.processor.aggregate=DEBUG` shows every group completion and why it completed.

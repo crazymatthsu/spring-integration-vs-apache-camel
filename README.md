@@ -72,10 +72,17 @@ Any of the four modules works the same way (`:usecase1:apache-camel`, `:usecase2
 The use case 1 apps write `./usecase1-<framework>.db` in their working directory; override it with
 `--fixflow.db.path=/somewhere/orders.db`.
 
-Publish orders with the demo producer (every 50th message gets a broken checksum here):
+Publish orders with the demo producer (here every 50th message gets a broken checksum, and every 40th repeats the
+previous ClOrdID so that its batch falls back to one-by-one inserts and raises a support alert):
 
 ```bash
-./gradlew :common:sendOrders -Ptopic=orders -Pcount=200 -PinvalidEvery=50
+./gradlew :common:sendOrders -Ptopic=orders -Pcount=200 -PinvalidEvery=50 -PduplicateEvery=40
+```
+
+The alert is an ERROR log line starting with `SUPPORT-ALERT`, and a record on the `support-alerts` topic:
+
+```bash
+podman exec fixflow-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic support-alerts --from-beginning --timeout-ms 5000
 ```
 
 For use case 2 publish to `algo` and `dma` instead. Then look at the application log, the database and the
@@ -115,9 +122,20 @@ flowchart LR
 | Insert | `JdbcMessageHandler`, which issues one JDBC batch update when the payload is an `Iterable` | `.to("sql:INSERT ... :#clOrdId ...?batch=true")` with a `List<Map>` body |
 | Ack after insert | `publishSubscribeChannel` with two sequential subscribers: the JDBC handler, then a handler acknowledging every record; the second never runs when the first throws | `.process(...)` after the `sql` endpoint, calling the `CamelKafkaManualCommit` of every record |
 | Poison record | `ExpressionEvaluatingRequestHandlerAdvice` (`trapException`, failure channel) around the parse step; a handler on that channel logs and acknowledges | `onException(FixParseException.class).handled(true).process(...)` logs and commits |
+| Batch insert fails on a row | `.transactional()` on the JDBC handler plus a second advice that traps the failure and diverts the batch to a fallback flow: `split` → insert one by one → `aggregate` → alert; the flow runs inside the trapped failure, so the acknowledgment subscriber still runs afterwards | `sql?batch=true&batchAutoCommitDisabled=true` inside `doTry`/`doCatch`; the catch calls a `direct:` route that `split`s the rows over a per-row `doTry`/`doCatch` and alerts; the route returns to the aggregate sub-route, which acknowledges |
 
-Both implementations insert with `INSERT OR IGNORE` on a unique `(sender_comp_id, cl_ord_id)` index, so a batch
-that is redelivered after a crash (at-least-once) does not create duplicates.
+Both implementations insert in one transaction per batch, and both handle a failed batch the same way. When the
+failure is *row-level* (a duplicate `(sender_comp_id, cl_ord_id)` violating the unique index, a constraint, bad data)
+the batch is rolled back and the rows are inserted one by one: the rows at fault are logged, skipped and reported to
+the support team in one alert per batch, the other rows are inserted, and the batch is acknowledged so that nothing is
+redelivered. When the failure is *database-level* (connection lost, database locked, disk full) the batch is aborted
+without acknowledgment, so Kafka redelivers it once the database is back. The decision is
+[`InsertFailurePolicy`](common/src/main/java/com/fixflow/common/orders/InsertFailurePolicy.java); the alert goes to
+an ERROR log line with the `SUPPORT_ALERT` marker and to the `support-alerts` Kafka topic
+([`common/.../alerts`](common/src/main/java/com/fixflow/common/alerts)), and any other channel can be added by
+implementing `SupportAlerter`. Note the consequence for at-least-once delivery: a batch redelivered after a crash now
+surfaces its already-inserted rows as duplicate-key failures, which are skipped and reported rather than silently
+ignored.
 
 Step-by-step walkthroughs of both implementations, with diagrams of the beans, channels, threads and headers, are in
 [usecase1/spring-integration/README.md](usecase1/spring-integration/README.md)
@@ -193,6 +211,10 @@ Spring Integration
   `DataSource` exists and fails for SQLite; `spring.integration.jdbc.initialize-schema=never` is required.
 - `JdbcMessageHandler` batches an `Iterable` payload, but mapping records to named parameters needs
   `usePayloadAsParameterSource(true)` and a `SqlParameterSourceFactory`.
+- The batch-insert fallback is an advice-and-failure-channel construction again, this time around the JDBC handler.
+  Advice order matters: the trapping advice must be outside `.transactional()` so that it sees the failure after the
+  rollback. Because the failure channel is a `DirectChannel`, the whole fallback flow (`split` → insert → `aggregate`
+  → alert) runs synchronously inside the trapped call, which is what lets the acknowledgment subscriber run afterwards.
 
 Apache Camel
 
@@ -206,6 +228,11 @@ Apache Camel
   component; the demos reference them explicitly with `#bean:` anyway. `camel-spring-boot-bom` manages only the
   starters, the core `camel-bom` is needed for `camel-kafka` itself.
 - `onException(...).handled(true)` is the simplest poison-message policy of the two.
+- `doTry`/`doCatch` nested inside a `split` inside another `doCatch` broke the Java DSL's block bookkeeping: the step
+  meant to follow the whole construct (the acknowledgment) ended up inside the catch, so only failed batches were
+  acknowledged. Splitting the fallback into small `direct:` routes, each ending with its own `doTry`/`doCatch`, removed
+  the ambiguity; the integration test is what caught it.
+- The `sql` producer only rolls back a failed batch when `batchAutoCommitDisabled=true` is set on the endpoint.
 
 Common ground
 
@@ -214,6 +241,8 @@ Common ground
 - Neither framework batches JDBC inserts differently in effect: both end up in one `PreparedStatement.executeBatch()`
   per batch.
 - Both poison-message policies acknowledge the bad record so that it cannot block its partition forever.
+- Both batch-insert fallbacks are the same policy in two dialects: roll the failed batch back, insert one by one, skip
+  and report the rows at fault, abort without acknowledgment when the database itself is the problem.
 
 ## Versions
 
@@ -235,8 +264,8 @@ what plain `AckMode.MANUAL` changes, how to get bigger JDBC batches, and the equ
 
 ## Not covered
 
-- Retries, dead-letter topics and transactions: a failed batch insert stays unacknowledged and is redelivered after
-  a restart in both implementations.
+- Retries and dead-letter topics: a batch that fails because of the database stays unacknowledged and is redelivered
+  after a restart in both implementations; rows skipped by the fallback are reported, not parked for replay.
 - Rebalance edge cases of the Camel deferred-commit proxy are handled only by dropping the state of revoked
   partitions; Spring Kafka's implementation is the battle-tested one.
 - Performance: the broker is a single node, SQLite is a single-writer database, and the batch sizes are demo-sized.
