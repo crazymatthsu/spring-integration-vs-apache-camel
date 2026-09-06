@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: usecase1-spring-integration
+  main:
+    keep-alive: true
+  kafka:
+    bootstrap-servers: ${FIXFLOW_KAFKA_BOOTSTRAP:localhost:9092}
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      # one poll = at most one batch; the container pauses until every record of a poll is acknowledged
+      max-poll-records: ${fixflow.orders.batch-size:50}
+  datasource:
+    url: jdbc:sqlite:${fixflow.db.path:./usecase1-spring-integration.db}
+    hikari:
+      maximum-pool-size: 2
+      data-source-properties:
+        journal_mode: WAL
+        busy_timeout: 10000
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/orders-schema.sql
+  integration:
+    jdbc:
+      # the JDBC message store is not used (and Spring Integration ships no SQLite schema for it)
+      initialize-schema: never
+
+fixflow:
+  orders:
+    topic: orders
+    group-id: uc1-spring-integration
+    batch-size: 50
+    batch-timeout: 500ms
+    concurrency: 1
+
+logging:
+  level:
+    com.fixflow: INFO
+    org.apache.kafka: WARN
+    org.springframework.kafka: WARN

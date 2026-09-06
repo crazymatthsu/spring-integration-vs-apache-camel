@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: usecase2-apache-camel
+  main:
+    keep-alive: true
+
+camel:
+  component:
+    kafka:
+      brokers: ${FIXFLOW_KAFKA_BOOTSTRAP:localhost:9092}
+      # manual commits that may be issued from any thread (see camel-kafka-support)
+      kafka-client-factory: "#bean:deferredCommitKafkaClientFactory"
+      kafka-manual-commit-factory: "#bean:deferredKafkaManualCommitFactory"
+
+fixflow:
+  sources:
+    algo-topic: algo
+    dma-topic: dma
+    group-id: uc2-apache-camel
+    handler-threads: 4
+    concurrency: 1
+
+logging:
+  level:
+    com.fixflow: INFO
+    org.apache.kafka: WARN
+    org.apache.camel.component.kafka: WARN

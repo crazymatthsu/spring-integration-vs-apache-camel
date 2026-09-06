@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: usecase2-spring-integration
+  main:
+    keep-alive: true
+  kafka:
+    bootstrap-servers: ${FIXFLOW_KAFKA_BOOTSTRAP:localhost:9092}
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      max-poll-records: 100
+
+fixflow:
+  sources:
+    algo-topic: algo
+    dma-topic: dma
+    group-id: uc2-spring-integration
+    handler-threads: 4
+    concurrency: 1
+
+logging:
+  level:
+    com.fixflow: INFO
+    org.apache.kafka: WARN
+    org.springframework.kafka: WARN
