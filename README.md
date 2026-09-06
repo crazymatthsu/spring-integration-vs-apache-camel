@@ -144,6 +144,10 @@ flowchart LR
 Both handlers delegate to the framework-neutral [`OrderProcessor`](common/src/main/java/com/fixflow/common/orders/OrderProcessor.java)
 from `common`, so the only difference between them is how the acknowledgment is expressed.
 
+Step-by-step walkthroughs of both implementations are in
+[usecase2/spring-integration/.../si/README.md](usecase2/spring-integration/src/main/java/com/fixflow/usecase2/si/README.md)
+and [usecase2/apache-camel/.../camel/README.md](usecase2/apache-camel/src/main/java/com/fixflow/usecase2/camel/README.md).
+
 ## The one big difference: acknowledging from another thread
 
 Both use cases acknowledge a record on a thread other than the Kafka consumer thread, after asynchronous work.
