@@ -15,9 +15,11 @@ import org.apache.kafka.common.serialization.StringSerializer;
 /**
  * Demo tool: publishes FIX 4.2 NewOrderSingle messages to a topic.
  * <pre>
- *   ./gradlew :common:sendOrders -Ptopic=orders -Pcount=100 -PinvalidEvery=25
+ *   ./gradlew :common:sendOrders -Ptopic=orders -Pcount=100 -PinvalidEvery=25 -PduplicateEvery=40
  * </pre>
- * Every {@code invalidEvery}-th message (0 = never) is sent with a broken checksum to exercise the poison-message path.
+ * Every {@code invalidEvery}-th message (0 = never) is sent with a broken checksum to exercise the poison-message
+ * path. Every {@code duplicateEvery}-th message (0 = never) repeats the ClOrdID of the previous message, so that the
+ * batch insert of use case 1 fails on the unique index and falls back to one-by-one inserts with a support alert.
  */
 public final class FixOrderProducer {
 
@@ -30,6 +32,7 @@ public final class FixOrderProducer {
         String topic = args.length > 0 ? args[0] : "orders";
         int count = args.length > 1 ? Integer.parseInt(args[1]) : 100;
         int invalidEvery = args.length > 2 ? Integer.parseInt(args[2]) : 0;
+        int duplicateEvery = args.length > 3 ? Integer.parseInt(args[3]) : 0;
         String bootstrap = System.getProperty("fixflow.kafka.bootstrap",
                 System.getenv().getOrDefault("FIXFLOW_KAFKA_BOOTSTRAP", "localhost:9092"));
 
@@ -42,9 +45,14 @@ public final class FixOrderProducer {
         FixMessageFactory factory = new FixMessageFactory("CLIENT1", "BROKER");
         String runId = UUID.randomUUID().toString().substring(0, 8);
         int invalid = 0;
+        int duplicates = 0;
         try (KafkaProducer<String, String> producer = new KafkaProducer<>(props)) {
             for (int i = 1; i <= count; i++) {
                 String clOrdId = runId + "-" + i;
+                if (duplicateEvery > 0 && i > 1 && i % duplicateEvery == 0) {
+                    clOrdId = runId + "-" + (i - 1); // same sender and ClOrdID as the previous order
+                    duplicates++;
+                }
                 String fix = randomOrder(factory, clOrdId);
                 if (invalidEvery > 0 && i % invalidEvery == 0) {
                     fix = FixMessageFactory.corruptChecksum(fix);
@@ -54,7 +62,8 @@ public final class FixOrderProducer {
             }
             producer.flush();
         }
-        System.out.printf("Sent %d messages (%d invalid) to topic '%s' on %s%n", count, invalid, topic, bootstrap);
+        System.out.printf("Sent %d messages (%d invalid, %d duplicates) to topic '%s' on %s%n",
+                count, invalid, duplicates, topic, bootstrap);
     }
 
     private static String randomOrder(FixMessageFactory factory, String clOrdId) {

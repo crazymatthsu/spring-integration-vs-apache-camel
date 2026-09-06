@@ -12,10 +12,14 @@ public final class OrderSql {
     /** Classpath location of the DDL, applied by Spring Boot's {@code spring.sql.init} in every demo. */
     public static final String SCHEMA_RESOURCE = "db/orders-schema.sql";
 
-    /** Insert statement with Spring-style named parameters ({@code :name}). */
+    /**
+     * Insert statement with Spring-style named parameters ({@code :name}).
+     * A duplicate {@code (sender_comp_id, cl_ord_id)} violates the unique index and fails the row, which the demos
+     * treat as a row-level failure: the batch falls back to one-by-one inserts and the duplicate is reported.
+     */
     public static final String INSERT = """
-            INSERT OR IGNORE INTO orders (cl_ord_id, symbol, side, order_qty, ord_type, price, transact_time,
-                                          sender_comp_id, target_comp_id, msg_seq_num, raw_message)
+            INSERT INTO orders (cl_ord_id, symbol, side, order_qty, ord_type, price, transact_time,
+                                sender_comp_id, target_comp_id, msg_seq_num, raw_message)
             VALUES (:clOrdId, :symbol, :side, :orderQty, :ordType, :price, :transactTime,
                     :senderCompId, :targetCompId, :msgSeqNum, :rawMessage)""";
 

@@ -14,5 +14,6 @@ CREATE TABLE IF NOT EXISTS orders (
     inserted_at     TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
--- Redelivered records (at-least-once) are ignored by the INSERT OR IGNORE statement thanks to this index.
+-- A replayed or redelivered order violates this index; the demos treat that as a row-level failure
+-- (the batch falls back to one-by-one inserts, the duplicate is skipped and reported to support).
 CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_sender_cl_ord_id ON orders (sender_comp_id, cl_ord_id);

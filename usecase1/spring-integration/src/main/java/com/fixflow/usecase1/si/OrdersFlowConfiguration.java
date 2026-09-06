@@ -5,18 +5,24 @@ import java.util.List;
 
 import javax.sql.DataSource;
 
+import com.fixflow.common.alerts.InsertFailure;
+import com.fixflow.common.alerts.SupportAlert;
+import com.fixflow.common.alerts.SupportAlerter;
 import com.fixflow.common.fix.FixMessageParser;
 import com.fixflow.common.fix.NewOrder;
 import com.fixflow.common.orders.BatchStats;
+import com.fixflow.common.orders.InsertFailurePolicy;
 import com.fixflow.common.orders.OrderSql;
 import com.fixflow.support.kafka.KafkaAcks;
 import com.fixflow.support.kafka.ManualAckContainers;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.TaskExecutor;
+import org.springframework.dao.DataAccessException;
 import org.springframework.integration.dsl.IntegrationFlow;
 import org.springframework.integration.dsl.MessageChannels;
 import org.springframework.integration.handler.advice.ExpressionEvaluatingRequestHandlerAdvice;
@@ -26,20 +32,27 @@ import org.springframework.integration.kafka.inbound.KafkaMessageDrivenChannelAd
 import org.springframework.integration.store.MessageGroup;
 import org.springframework.integration.support.MessageBuilder;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.listener.ConcurrentMessageListenerContainer;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageHeaders;
+import org.springframework.messaging.MessagingException;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 /**
  * The Spring Integration flow of use case 1:
  * <pre>
- *  Kafka (manual ack) -> ExecutorChannel -> transform (FIX -> NewOrder) -> aggregate (size | timeout)
- *      -> pub/sub: [1] JdbcMessageHandler batch INSERT   [2] acknowledge every record of the batch
+ *  Kafka (manual ack) -> ExecutorChannel -> handle (FIX -> NewOrder) -> aggregate (size | timeout)
+ *      -> pub/sub: [1] JdbcMessageHandler batch INSERT (one transaction)   [2] acknowledge every record of the batch
+ *
+ *  batch INSERT failed on a row -> batchInsertFallback: split -> insert one by one -> aggregate -> alert support
  * </pre>
- * The Kafka consumer thread only hands the record over to the executor; parsing, batching, the JDBC batch insert
- * and the acknowledgments all happen on the {@code uc1-batch-} thread (or the scheduler thread for a timeout).
+ * The Kafka consumer thread only hands the record over to the executor; parsing, batching, the JDBC batch insert,
+ * the fallback and the acknowledgments all happen on the {@code uc1-batch-} thread (or the scheduler thread for a
+ * timeout). The fallback runs inside the trapped failure of the batch insert, so the acknowledgment step only runs
+ * after every row has been tried; a database-level failure aborts instead and nothing is acknowledged.
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(OrdersProperties.class)
@@ -48,8 +61,14 @@ public class OrdersFlowConfiguration {
     /** Header on the aggregated message: the {@link Acknowledgment} of every record that went into the batch. */
     static final String BATCH_ACKS = "fixflow_batchAcknowledgments";
 
+    /** Header on the fallback messages: the exception that failed the batch insert. */
+    static final String BATCH_FAILURE = "fixflow_batchFailure";
+
     /** Channel receiving the records that cannot be parsed. */
     static final String INVALID_ORDERS_CHANNEL = "invalidOrders";
+
+    /** Channel receiving a batch whose JDBC batch insert failed on a row. */
+    static final String BATCH_INSERT_FALLBACK_CHANNEL = "batchInsertFallback";
 
     private static final Logger log = LoggerFactory.getLogger(OrdersFlowConfiguration.class);
 
@@ -97,12 +116,22 @@ public class OrdersFlowConfiguration {
         return advice;
     }
 
+    /** Traps a failed batch insert (its transaction already rolled back) and hands the batch to the fallback flow. */
+    @Bean
+    ExpressionEvaluatingRequestHandlerAdvice batchInsertFallbackAdvice() {
+        ExpressionEvaluatingRequestHandlerAdvice advice = new ExpressionEvaluatingRequestHandlerAdvice();
+        advice.setFailureChannelName(BATCH_INSERT_FALLBACK_CHANNEL);
+        advice.setTrapException(true);
+        return advice;
+    }
+
     @Bean
     IntegrationFlow ordersFlow(ConcurrentMessageListenerContainer<String, String> ordersListenerContainer,
                                TaskExecutor ordersBatchExecutor,
                                FixMessageParser parser,
                                ExpressionEvaluatingRequestHandlerAdvice invalidOrderAdvice,
                                JdbcMessageHandler ordersBatchInsert,
+                               ExpressionEvaluatingRequestHandlerAdvice batchInsertFallbackAdvice,
                                BatchStats batchStats,
                                OrdersProperties props) {
         return IntegrationFlow
@@ -123,8 +152,33 @@ public class OrdersFlowConfiguration {
                         .outputProcessor(OrdersFlowConfiguration::toBatch))
                 // subscribers run sequentially; the acknowledgment step is skipped when the insert throws
                 .publishSubscribeChannel(pubSub -> pubSub
-                        .subscribe(flow -> flow.handle(ordersBatchInsert))
+                        // one transaction per batch: a failed batch leaves nothing behind for the fallback;
+                        // the fallback advice is outermost, so it sees the failure after the rollback
+                        .subscribe(flow -> flow.handle(ordersBatchInsert,
+                                e -> e.advice(batchInsertFallbackAdvice).transactional()))
                         .subscribe(flow -> flow.handle(message -> acknowledge(message, batchStats))))
+                .get();
+    }
+
+    /**
+     * Fallback after a batch insert failed on a row: insert the rows one by one, skip the rows that are at fault,
+     * report them to support. Runs synchronously on the batch thread, inside the trapped failure.
+     */
+    @Bean
+    IntegrationFlow batchInsertFallbackFlow(NamedParameterJdbcTemplate jdbcTemplate,
+                                            SupportAlerter supportAlerter,
+                                            BatchStats batchStats,
+                                            @Value("${spring.application.name}") String applicationName) {
+        return IntegrationFlow.from(BATCH_INSERT_FALLBACK_CHANNEL)
+                // the ErrorMessage carries the failed batch; abort (rethrow) unless the failure is row-level
+                .transform(MessagingException.class, OrdersFlowConfiguration::failedBatch)
+                .split()
+                .handle(NewOrder.class, (order, headers) -> insertOne(jdbcTemplate, order))
+                .aggregate(aggregator -> aggregator.expireGroupsUponCompletion(true))
+                .handle(List.class, (results, headers) -> {
+                    report(results, headers, supportAlerter, batchStats, applicationName);
+                    return null;
+                })
                 .get();
     }
 
@@ -157,5 +211,67 @@ public class OrdersFlowConfiguration {
         acks.forEach(Acknowledgment::acknowledge);
         batchStats.recordBatch(acks.size());
         log.info("Inserted and acknowledged a batch of {} orders on {}", acks.size(), Thread.currentThread().getName());
+    }
+
+    /** The orders of the failed batch, or an exception (aborting the batch) when the database itself is in trouble. */
+    @SuppressWarnings("unchecked")
+    private static Message<List<NewOrder>> failedBatch(MessagingException failure) {
+        Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+        if (!InsertFailurePolicy.isRowLevel(cause)) {
+            log.error("Batch insert failed because of the database, not a row; nothing acknowledged, "
+                    + "the batch will be redelivered: {}", InsertFailure.reasonOf(cause));
+            throw failure;
+        }
+        List<NewOrder> orders = (List<NewOrder>) failure.getFailedMessage().getPayload();
+        log.warn("Batch insert of {} orders failed ({}); inserting them one by one",
+                orders.size(), InsertFailure.reasonOf(cause));
+        return MessageBuilder.withPayload(orders).setHeader(BATCH_FAILURE, cause).build();
+    }
+
+    private static RowInsert insertOne(NamedParameterJdbcTemplate jdbcTemplate, NewOrder order) {
+        try {
+            jdbcTemplate.update(OrderSql.INSERT, new MapSqlParameterSource(OrderSql.parameters(order)));
+            return RowInsert.inserted(order);
+        }
+        catch (DataAccessException e) {
+            if (!InsertFailurePolicy.isRowLevel(e)) {
+                throw e; // the database is in trouble: abort the fallback, nothing is acknowledged
+            }
+            log.error("Skipping order {} that could not be inserted: {}", order, InsertFailure.reasonOf(e));
+            return RowInsert.failed(order, e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void report(List<?> results, MessageHeaders headers, SupportAlerter supportAlerter,
+                               BatchStats batchStats, String applicationName) {
+        List<RowInsert> rows = (List<RowInsert>) results;
+        List<InsertFailure> failures = rows.stream().filter(RowInsert::failed).map(RowInsert::failure).toList();
+        Throwable batchFailure = (Throwable) headers.get(BATCH_FAILURE);
+        batchStats.recordFallback(failures.size());
+        if (failures.isEmpty()) {
+            log.info("All {} orders inserted one by one after the batch insert failed", rows.size());
+            return;
+        }
+        supportAlerter.raise(SupportAlert.now(applicationName,
+                failures.size() + " of " + rows.size() + " orders could not be inserted after the batch insert failed ("
+                        + InsertFailure.reasonOf(batchFailure) + ")",
+                failures));
+    }
+
+    /** Outcome of one row of the fallback. */
+    record RowInsert(NewOrder order, InsertFailure failure) {
+
+        static RowInsert inserted(NewOrder order) {
+            return new RowInsert(order, null);
+        }
+
+        static RowInsert failed(NewOrder order, Throwable error) {
+            return new RowInsert(order, InsertFailure.of(order, error));
+        }
+
+        boolean failed() {
+            return failure != null;
+        }
     }
 }
