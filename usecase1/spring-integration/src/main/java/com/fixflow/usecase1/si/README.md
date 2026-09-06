@@ -17,23 +17,23 @@ Keep both levels apart while reading and the class becomes simple.
 
 ```mermaid
 flowchart TB
-    subgraph CT["Kafka consumer thread  (ordersListenerContainer-0-C-1)"]
-        K[(Kafka topic<br/>orders)] -->|poll, AckMode.MANUAL<br/>asyncAcks=true| A[KafkaMessageDrivenChannelAdapter<br/>1 record = 1 Message&lt;String&gt;<br/>+ kafka_acknowledgment header]
+    subgraph CT["Kafka consumer thread (ordersListenerContainer-0-C-1)"]
+        K[("Kafka topic<br/>orders")] -->|"poll, AckMode.MANUAL<br/>asyncAcks=true"| A["KafkaMessageDrivenChannelAdapter<br/>1 record = 1 Message&lt;String&gt;<br/>+ kafka_acknowledgment header"]
     end
-    A -->|send| X[/ExecutorChannel &quot;ordersChannel&quot;<br/>queue + 1 thread/]
-    subgraph BT["batch thread  (uc1-batch-1)"]
-        X --> P[service activator<br/>parse FIX 4.2 → NewOrder<br/>advice traps failures]
-        P -->|Message&lt;NewOrder&gt;,<br/>same headers| G[aggregator<br/>one group &quot;orders&quot;<br/>release: size ≥ batchSize]
-        G -->|Message&lt;List&lt;NewOrder&gt;&gt;<br/>+ fixflow_batchAcknowledgments| PS[/PublishSubscribeChannel<br/>no executor = sequential/]
-        PS -->|1st subscriber| J[JdbcMessageHandler<br/>one JDBC batch INSERT]
-        PS -->|2nd subscriber,<br/>only if 1st succeeded| ACK[acknowledge every<br/>record of the batch]
+    A -->|"send"| X[/"ExecutorChannel 'ordersChannel'<br/>queue + 1 thread"/]
+    subgraph BT["batch thread (uc1-batch-1)"]
+        X --> P["service activator<br/>parse FIX 4.2 into NewOrder<br/>advice traps failures"]
+        P -->|"Message&lt;NewOrder&gt;,<br/>same headers"| G["aggregator<br/>one group 'orders'<br/>release: size reaches batchSize"]
+        G -->|"Message&lt;List&lt;NewOrder&gt;&gt;<br/>+ fixflow_batchAcknowledgments"| PS[/"PublishSubscribeChannel<br/>no executor = sequential"/]
+        PS -->|"1st subscriber"| J["JdbcMessageHandler<br/>one JDBC batch INSERT"]
+        PS -->|"2nd subscriber,<br/>only if 1st succeeded"| ACK["acknowledge every<br/>record of the batch"]
     end
-    subgraph ST["scheduler thread  (scheduling-1)"]
-        T[groupTimeout expired:<br/>release the partial group] --> G
+    subgraph ST["scheduler thread (scheduling-1)"]
+        T["groupTimeout expired:<br/>release the partial group"] --> G
     end
-    P -.->|parse failure:<br/>ErrorMessage| IV[/DirectChannel &quot;invalidOrders&quot;/]
-    IV --> IH[InvalidOrderHandler<br/>log + acknowledge]
-    ACK -.->|acks are queued,<br/>committed by the<br/>consumer thread| K
+    P -.->|"parse failure:<br/>ErrorMessage"| IV[/"DirectChannel 'invalidOrders'"/]
+    IV --> IH["InvalidOrderHandler<br/>log + acknowledge"]
+    ACK -.->|"acks are queued,<br/>committed by the<br/>consumer thread"| K
     IH -.-> K
 ```
 
