@@ -219,6 +219,12 @@ Common ground
 | SQLite JDBC | 3.53.4.0 |
 | Gradle | 9.2.1 (wrapper), Java 21 bytecode |
 
+## Further reading
+
+[docs/kafka-manual-ack-and-batching.md](docs/kafka-manual-ack-and-batching.md) records the analysis behind the
+manual-acknowledgment design: how Spring Kafka's `asyncAcks` works internally and why it caps a batch at one poll,
+what plain `AckMode.MANUAL` changes, how to get bigger JDBC batches, and the equivalent knobs on the Camel side.
+
 ## Not covered
 
 - Retries, dead-letter topics and transactions: a failed batch insert stays unacknowledged and is redelivered after
